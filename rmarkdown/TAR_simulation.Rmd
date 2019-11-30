@@ -1,8 +1,10 @@
 ---
-title: "TAR simulation (constant threshold)"
+title: "Threshold autoregressive model (TAR) estimation with R"
 author: "Shota Komatsu"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -14,13 +16,50 @@ library(foreach)
 source("../R/TAR_with_constant_threshold.R")
 ```
 
-# Setting parameters
+I would like to consider how to estimate an econometric model based on the Law of One Price. 
+
+Suppose there are two markets and that there is one commodity (e.g. apple). If two markets are linked by trade and arbitrage, those two markets will have a common, unique price, provided there is no transportation cost.
+
+Let $p_{i,t}$ and $p_j,t$ be prices of a commodity at time t in market $i$ and $j$, respectively, and $c_{ij,t}$ be the transportation cost between market $i$ and $j$ at time $t$. If market $i$ and $j$ are integrated, then
+$$
+\lvert p_{i, t} - p_{j, t}  \rvert \leq c_{ij, t}
+$$
+should hold. This is because if
+$$
+\lvert p_{i, t} - p_{j, t}  \rvert > c_{ij, t}
+$$
+holds, arbitrageurs have incentives to make arbitrage for profits. But as more and more arbitrages happen, the price spread shrinks so that it equals the transaction cost.
+
+Thus I would like to have a model in which the price adjustment mechanism works only if the abusolute value of the eprice difference in the previous period exceeds the transaction cost. This can be modeled as follows:
+$$
+\begin{aligned}
+m_{ij, t} - m_{ij, t-1} = 
+	\begin{cases}
+	\varepsilon_{ij, t} & (\lvert m_{ij, t-1} \rvert \leq \theta_{ij, t-1}) \\
+	\rho m_{ij, t-1} + \varepsilon_{ij, t} & (\lvert m_{ij, t-1} \rvert > \theta_{ij, t-1})
+	\end{cases},
+\end{aligned}
+$$
+where $m_{ij,t} := p_{ij, t} - p_{ij, t-1}$. A graphical explanation of this model is in the figure below.
+
+```{r pressure, echo=FALSE, out.width = '70%', fig.align="center"}
+knitr::include_graphics("TAR_graph.png")
+```
+
+There are R libraries that such as ```tsDyn```, but the problem is that as far as I check, I cannot estimate the above model with the existing libraries. So it is necessary to write R codes tailored to my own need.
+
+
+# TAR with constant threshold
+
+First, I write a code that assumes $\theta_{t} = \theta$ for all $t$.
+
+## Setting parameters
 
 ```{r}
 # Set seed
 set.seed(123)
 # Number of observations + 1
-n <- 5001
+n <- 101
 # Draw data from normal distribution
 y <- rnorm(n, mean = 0, sd = 10)
 z <- rep(0, n)
@@ -31,15 +70,15 @@ rho <- -0.5
 theta <- 10
 ```
 
-# Simulating data
+## Simulating data
 
 We will simulate the data folling the data generating process below:
 
 $$
-\begin{align}
+\begin{aligned}
 &m_{t} - m_{t-1} = \rho m_{t-1} \times 1 \{\lvert m_{t-1} \rvert > \theta  \} + \varepsilon_{t} \\
 \Leftrightarrow \quad &m_{t} = (1 + \rho) m_{t-1} \times 1 \{\lvert m_{t-1} \rvert > \theta  \} + \varepsilon_{t},
-\end{align}
+\end{aligned}
 $$
 where $m_{t} := y_{t} - y_{t-1}$.
 
@@ -85,17 +124,17 @@ ggplot(data = df, aes(x = t, y = z)) +
   geom_point(size = 1)
 ```
 
-# Estimating the parameters
+## Estimating the parameters
 
 The estimation of TAR model consists of the following steps:
 
 1. The possible candidates for $\theta$ are selected from the $m_{t}$ in the data in such a way that at least 20% of observations are either within or outside the band formed by the thresholds. This means that to assure regime switching, you exclude the candidates which make almost all $m_{t}$ inside or outside the band.
 
-1. For each candidate $\theta$, create a variable $z_{t}$ that takes 1 if $\lvert m_{t-1} \rvert > \theta$ and 0 otherwise.
+1. For each candidate $\theta$, create a variable $z_{t} := 1 \{\lvert m_{t-1} \rvert > \theta \}$.
 
 1. Compute $m_{t-1} \times z_{t}$.
 
-1. Regress $m_{t} - m_{t-1}$ on $m_{t-1} \times z_{t}$. Compute the sum of squared residuals ($RSS(\theta)$).
+1. Regress $m_{t} - m_{t-1}$ on $m_{t-1} \times z_{t}$. Compute the residual sum of squares ($RSS(\theta)$).
 
 1. Select the model that minimizes $RSS(\theta)$.
 
