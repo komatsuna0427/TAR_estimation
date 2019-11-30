@@ -1,0 +1,153 @@
+---
+title: "TAR simulation (time varying threshold)"
+author: "Shota Komatsu"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(magrittr)
+library(ggplot2)
+library(foreach)
+library(doParallel)
+registerDoParallel()
+# Load a function that computes TAR parameters.
+source("../code/TAR_with_time_varying_threshold.R")
+```
+
+# Set parameters
+```{r}
+# Set seed
+set.seed(1)
+n <- 1000
+y <- rnorm(n, mean = 0, sd = 10)
+fl <- rep(0, n)
+e <- rnorm(n, mean = 0, sd = 5)
+rho <- -0.5
+```
+
+# Simulate data
+
+```{r}
+df <- tibble::tibble(y, fl, e) %>%
+  dplyr::mutate(L.y = dplyr::lag(y, k = 1)) %>%
+  na.omit() %>%
+  dplyr::mutate(m = NA)
+```
+
+```{r}
+tau_first <- 7
+tau_last <- 12
+T <- nrow(df)
+
+df <- df %>%
+  dplyr::mutate(trend = 0:(T - 1)) %>%
+  dplyr::mutate(tau_trend = tau_first + (tau_last - tau_first) * (trend / (T - 1)))
+
+{
+  if (abs(df$L.y[1]) <= df$tau_trend[1]) {
+    df$m[1] <- df$L.y[1] + df$e[1]
+    df$fl[1] <- 0
+  }
+  else if (df$L.y[1] < -df$tau_trend[1]) {
+    df$m[1] <- (1 + rho) * df$L.y[1] + df$e[1]
+    df$fl[1] <- -1
+  }
+  else {
+    df$m[1] <- (1 + rho) * df$L.y[1] + df$e[1]
+    df$fl[1] <- 1
+  }
+}
+
+for (i in 2:nrow(df)) {
+  if (abs(df$m[i-1]) <= df$tau_trend[i]) {
+    df$m[i] <- df$m[i-1] + df$e[i]
+    df$fl[i] <- 0
+  }
+  else if (df$m[i-1] < -df$tau_trend[i]) {
+    df$m[i] <- (1 + rho) * df$m[i-1] + df$e[i]
+    df$fl[i] <- -1
+  }
+  else {
+    df$m[i] <- (1 + rho) * df$m[i-1] + df$e[i]
+    df$fl[i] <- 1
+  }
+}
+```
+
+
+```{r}
+# Plot the simulated data
+ggplot(data = df, aes(x = trend, y = m)) + 
+  geom_line()
+```
+
+```{r}
+# Regime switching
+ggplot(data = df, aes(x = trend, y = fl)) + 
+  geom_point(size = 1)
+```
+
+
+```{r}
+#result <- TAR_threshold_varying(df$m)
+#save(result, file = "data/TAR_time_varying_simulation.RData")
+```
+
+
+```{r}
+load(file = "data/TAR_time_varying_simulation.RData")
+# Estimated regression function
+reg <- result$regression
+# Robust standard error
+RobustSE <- as.vector(lmtest::coeftest(reg, vcov = sandwich::vcovHC(reg, "HC1"))[, 2])
+# Threshold value
+theta_first <- round(mean(result$theta_first), digits = 3)
+theta_last <- round(mean(result$theta_last), digits = 3)
+# Halflife value
+halflife <- round(result$halflife, digits = 3)
+# Output by stargazer
+stargazer::stargazer(
+  result$regression, 
+  se = list(c(RobustSE)),
+  type = "text", 
+  add.lines = list(
+    c("Threshold Value (first)", theta_first), 
+    c("Threshold value (last)", theta_last),
+    c("Halflife", halflife)
+  )
+)
+```
+
+```{r}
+# Contour plot
+g_contour <- result$plot_contour +
+  geom_vline(xintercept = tau_first, linetype = "dotted") +
+  geom_hline(yintercept = tau_last, linetype = "dotted") +
+  xlab(latex2exp::TeX("$\\theta_{first}$")) +
+  ylab(latex2exp::TeX("$\\theta_{last}$")) +
+  scale_linetype_discrete(name = "Residual sum of squares")
+plot(g_contour)
+```
+
+Check if $\theta_{first}$ minimizes RSS given the estimated $\theta_{last}$.
+
+```{r}
+g_theta_first <- result$plot_theta_first +
+  geom_vline(xintercept = tau_first, linetype = "dotted") +
+  xlab(latex2exp::TeX("$\\theta_{first}$"))
+plot(g_theta_first)
+```
+
+
+Check if $\theta_{last}$ minimizes RSS given the estimated $\theta_{first}$.
+
+```{r}
+g_theta_last <- result$plot_theta_last +
+  geom_vline(xintercept = tau_last, linetype = "dotted") +
+  xlab(latex2exp::TeX("$\\theta_{last}$"))
+plot(g_theta_last)
+```
+
+
