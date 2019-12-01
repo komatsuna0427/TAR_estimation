@@ -3,7 +3,6 @@ title: "Threshold autoregressive model (TAR) estimation with R"
 author: "Shota Komatsu"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output:
-  html_document: default
   pdf_document: default
 ---
 
@@ -14,6 +13,7 @@ library(ggplot2)
 library(foreach)
 # Load a function that estimates TAR parameters.
 source("../R/TAR_with_constant_threshold.R")
+source("../R/TAR_with_time_varying_threshold.R")
 ```
 
 I would like to consider how to estimate an econometric model based on the Law of One Price. 
@@ -49,26 +49,9 @@ knitr::include_graphics("TAR_graph.png")
 There are R libraries that such as ```tsDyn```, but the problem is that as far as I check, I cannot estimate the above model with the existing libraries. So it is necessary to write R codes tailored to my own need.
 
 
-# TAR with constant threshold
+# TAR with constant thresholds
 
 First, I write a code that assumes $\theta_{t} = \theta$ for all $t$.
-
-## Setting parameters
-
-```{r}
-# Set seed
-set.seed(123)
-# Number of observations + 1
-n <- 101
-# Draw data from normal distribution
-y <- rnorm(n, mean = 0, sd = 10)
-z <- rep(0, n)
-e <- rnorm(n, mean = 0, sd = 5)
-# AR parameter
-rho <- -0.5
-# Threshold value
-theta <- 10
-```
 
 ## Simulating data
 
@@ -81,6 +64,23 @@ $$
 \end{aligned}
 $$
 where $m_{t} := y_{t} - y_{t-1}$.
+
+```{r}
+# Set parameters
+# Set seed
+set.seed(123)
+# Number of observations + 1
+n <- 1001
+# Draw data from normal distribution
+y <- rnorm(n, mean = 0, sd = 10)
+z <- rep(0, n)
+e <- rnorm(n, mean = 0, sd = 5)
+# AR parameter
+rho <- -0.5
+# Threshold value
+theta <- 10
+```
+
 
 ```{r}
 # Make dataset
@@ -176,4 +176,198 @@ comparison <-
   )
 comparison
 ```
+
+
+# TAR with time-varying thresholds
+
+Following @van2007, TAR model allows transaction costs to be time-varying as
+$$
+\theta_{ij, t} = \theta_{ij, 0} + \left( \theta_{ij,T} - \theta_{ij,0} \right) \frac{t}{T-1}, \quad (t = 0, 1, \cdots, T-1)
+$$
+where $T$ is the total number of observations. Since the direct measurement of transaction costs is unavailable, $\theta_{ij,0}$ and $\theta_{ij,T}$ are determined through a grid search over possible candidates for those thresholds.
+
+## Estimating the parameters
+
+The estimation of TAR model consists of the following steps:
+
+1. The possible candidates for $\theta$ are selected from the $m_{t}$ in the data in such a way that at least 20% of observations are either within or outside the band formed by the thresholds. This means that to assure regime switching, you exclude the candidates which make almost all $m_{t}$ inside or outside the band.
+
+1. Make all possible pairs of $\theta_{0}$ and $\theta_{T}$ from the threshold candidates.
+
+1. For each pair of threthold candidate $\theta_{0}$ and $\theta_{T}$, compute $\theta_{t}$ for each $t$.
+
+1. Create a variable $z_{t} := 1 \{\lvert m_{t-1} \rvert > \theta_{t} \}$.
+
+1. Compute $m_{t-1} \times z_{t}$.
+
+1. Regress $m_{t} - m_{t-1}$ on $m_{t-1} \times z_{t}$. Compute the residual sum of squares ($RSS(\theta_{0}, \theta_{T})$).
+
+1. Select the model that minimizes $RSS(\theta_{0}, \theta_{T})$.
+
+It is possible that there are multiple minimizer aroud the global minimum. In that case, the code yields the arithmetic average of them. You should check whether the averaged parameters are concentrated arould the global minimum by plotting RSS.
+
+
+## Simulate data
+
+We will simulate the data folling the data generating process below:
+
+$$
+\begin{aligned}
+&m_{t} - m_{t-1} = \rho m_{t-1} \times 1 \{\lvert m_{t-1} \rvert > \theta_{t}  \} + \varepsilon_{t} \\
+\Leftrightarrow \quad &m_{t} = (1 + \rho) m_{t-1} \times 1 \{\lvert m_{t-1} \rvert > \theta_{t}  \} + \varepsilon_{t},
+\end{aligned}
+$$
+where $m_{t} := y_{t} - y_{t-1}$, $\theta_{ij, t} = \theta_{ij, 0} + \left( \theta_{ij,T} - \theta_{ij,0} \right) \frac{t}{T-1}, \quad (t = 0, 1, \cdots, T-1)$.
+
+
+```{r}
+# Set parameters
+# Set seed
+set.seed(1)
+# total number of observations + 1
+n <- 1001
+# Draw data from normal distribution
+y <- rnorm(n, mean = 0, sd = 10)
+z <- rep(0, n)
+e <- rnorm(n, mean = 0, sd = 5)
+# AR parameter
+rho <- -0.5
+# Threshold value
+theta_first <- 7
+theta_last <- 12
+```
+
+
+```{r}
+df <- tibble::tibble(y, z, e) %>%
+  dplyr::mutate(L.y = dplyr::lag(y, k = 1)) %>%
+  dplyr::mutate(m = y - L.y) %>%
+  dplyr::mutate(t = 0:(n-1))%>%
+  dplyr::filter(!is.na(m))
+# Total number of observations
+T <- nrow(df)
+# Create a variable for time-varying threshold
+df <- df %>%
+  dplyr::mutate(trend = 0:(T - 1)) %>%
+  dplyr::mutate(theta_trend = theta_first + (theta_last - theta_first) * (trend / (T - 1)))
+
+for (i in 2:nrow(df)) {
+  if (abs(df$m[i-1]) <= df$theta_trend[i]) {
+    df$m[i] <- df$m[i-1] + df$e[i]
+    df$z[i] <- 0
+  }
+  else if (df$m[i-1] < -df$theta_trend[i]) {
+    df$m[i] <- (1 + rho) * df$m[i-1] + df$e[i]
+    df$z[i] <- -1
+  }
+  else {
+    df$m[i] <- (1 + rho) * df$m[i-1] + df$e[i]
+    df$z[i] <- 1
+  }
+}
+```
+
+
+```{r}
+# Plot the simulated data
+ggplot(data = df, aes(x = trend, y = m)) + 
+  geom_line()
+```
+
+```{r}
+# Regime switching
+ggplot(data = df, aes(x = trend, y = z)) + 
+  geom_point(size = 1)
+```
+
+It takes time to estimate the parameters because we have to compute RSS for all possble pairs of thresholds. If $T = 1000$, the number of pairs is $(1000 * 0.8)^{2} = 640,000$. To speed up computation, it is better to write the code using  ```Rcpp```. 
+
+```{r}
+# Estimate TAR with time-varying thresholds.
+result <- TAR_threshold_varying(df$m)
+```
+
+
+```{r}
+# Estimated regression function
+reg <- result$regression
+# Robust standard error
+RobustSE <- as.vector(lmtest::coeftest(reg, vcov = sandwich::vcovHC(reg, "HC1"))[, 2])
+# Threshold value
+theta_first_estimate <- round(mean(result$theta_first), digits = 3)
+theta_last_estimate <- round(mean(result$theta_last), digits = 3)
+# Halflife value
+halflife <- round(result$halflife, digits = 3)
+# Output by stargazer
+stargazer::stargazer(
+  result$regression, 
+  se = list(c(RobustSE)),
+  type = "text", 
+  add.lines = list(
+    c("Threshold Value (first)", theta_first_estimate), 
+    c("Threshold value (last)", theta_last_estimate),
+    c("Halflife", halflife)
+  )
+)
+```
+
+Check if RSS is minimized around the true parameter.
+
+```{r}
+# Contour plot
+g_contour <- result$plot_contour +
+  geom_vline(xintercept = theta_first, linetype = "dotted") +
+  geom_hline(yintercept = theta_last, linetype = "dotted") +
+  xlab(latex2exp::TeX("$\\theta_{first}$")) +
+  ylab(latex2exp::TeX("$\\theta_{last}$")) +
+  scale_linetype_discrete(name = "Residual sum of squares")
+plot(g_contour)
+```
+
+Check if $\theta_{first}$ minimizes RSS given the estimated $\theta_{last}$.
+
+```{r}
+g_theta_first <- result$plot_theta_first +
+  geom_vline(xintercept = theta_first, linetype = "dotted") +
+  xlab(latex2exp::TeX("$\\theta_{first}$"))
+plot(g_theta_first)
+```
+
+
+Check if $\theta_{last}$ minimizes RSS given the estimated $\theta_{first}$.
+
+```{r}
+g_theta_last <- result$plot_theta_last +
+  geom_vline(xintercept = theta_last, linetype = "dotted") +
+  xlab(latex2exp::TeX("$\\theta_{last}$"))
+plot(g_theta_last)
+```
+
+```{r}
+# Compare the true and estimated parameters
+comparison <- 
+  data.frame(
+    parameter = c("rho", "theta_first", "theta_last"),
+    true = c(rho, theta_first, theta_last),
+    estimate = c(as.numeric(result$regression$coefficients), theta_first_estimate, theta_last_estimate)
+  )
+comparison
+```
+
+---
+references:
+- id: van2007
+  title: 'Modeling trends in food market integration: Method and an application to Tanzanian maize markets'
+  author:
+  - family: Van Campenhout
+    given: Bjorn
+  container-title: Food Policy
+  volume: 32
+  issue: 1
+  page: 112-127
+  type: article-journal
+  issued:
+    year: 2007
+---
+
 
