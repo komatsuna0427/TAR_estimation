@@ -354,6 +354,8 @@ comparison <-
 comparison
 ```
 
+# References
+
 ---
 references:
 - id: van2007
